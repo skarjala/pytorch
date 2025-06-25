@@ -1,9 +1,18 @@
-import io, logging, subprocess, sys, tempfile, torch, torch._logging.structured
+# Owner(s): ["module: dynamo"]
+import io
+import logging
+import subprocess
+import sys
+import tempfile
+
+import torch
+import torch._logging.structured
 
 from torch._inductor.test_case import TestCase
+from torch.testing._internal.common_utils import IS_FBCODE
 
 
-class _FxGraphRunnableFilter(logging.Filter):
+class FxGraphRunnableFilter(logging.Filter):
     def filter(self, record):
         return (
             "artifact" in record.metadata
@@ -11,12 +20,12 @@ class _FxGraphRunnableFilter(logging.Filter):
         )
 
 
-class _PayloadFormatter(logging.Formatter):
+class StructuredTracePayloadFormatter(logging.Formatter):
     def format(self, record):
         return record.payload.strip()
 
 
-traceLOG = logging.getLogger("torch.__trace")
+trace_log = logging.getLogger("torch.__trace")
 
 
 class FxGraphRunnableTest(TestCase):
@@ -25,22 +34,25 @@ class FxGraphRunnableTest(TestCase):
         super().setUp()
         torch._dynamo.reset()
         torch._logging.structured.INTERN_TABLE.clear()
+        self.old_level = trace_log.level
+        trace_log.setLevel(logging.DEBUG)
 
-        self._old_level = traceLOG.level
-        traceLOG.setLevel(logging.DEBUG)
+        # Create a custom filter specifically for fx_graph_runnable entries
+        self.filter = FxGraphRunnableArtifactFilter()
 
-        self._buf = io.StringIO()
-        self._handler = logging.StreamHandler(self._buf)
-        self._handler.setFormatter(_PayloadFormatter())
-        self._handler.addFilter(_FxGraphRunnableFilter())
-        traceLOG.addHandler(self._handler)
+        # Create a separate buffer and handler for capturing fx_graph_runnable entries
+        self.buffer = io.StringIO()
+        self.handler = logging.StreamHandler(self.buffer)
+        self.handler.setFormatter(StructuredTracePayloadFormatter())
+        self.handler.addFilter(self.filter)
+        trace_log.addHandler(self.handler)
 
     def tearDown(self):
-        traceLOG.removeHandler(self._handler)
-        traceLOG.setLevel(self._old_level)
+        trace_log.removeHandler(self._handler)
+        trace_log.setLevel(self._old_level)
 
     #helper function
-    def _exec_payload(self):
+    def _exec_and_verify_payload(self):
         #Write captured payload & run it in a fresh Python process
         payload = self._buf.getvalue().strip()
         self.assertTrue(payload, "Expected fx_graph_runnable payload but got nothing")
@@ -84,5 +96,8 @@ class FxGraphRunnableTest(TestCase):
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
+    if not IS_FBCODE:
+        # fbcode complains about not being able to find torch in subprocess
+        from torch._dynamo.test_case import run_tests
 
-    run_tests()
+        run_tests()
